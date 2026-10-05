@@ -1,7 +1,30 @@
+name: Run subs-check
+
+on:
+  schedule:
+    # 中国时间每天 08:00 运行（UTC 00:00）
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-subscriptions:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+
+      - name: 准备配置文件和输出目录
+        run: |
+          cp config.example.yaml config.yaml
+          mkdir -p output
+
       - name: 运行 subs-check (Docker)
         run: |
           # 后台启动容器
           docker run -d --name subs-check \
+            -e TZ=Asia/Shanghai \
             -e CHECK_INTERVAL=99999999 \
             -v ${{ github.workspace }}/config.yaml:/app/config/config.yaml \
             -v ${{ github.workspace }}/output:/app/output \
@@ -13,18 +36,15 @@
           FOUND=false
 
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            # 进度打印
             REMAINING=$((TIMEOUT - ELAPSED))
             echo "⏳ 已等待 ${ELAPSED}s / 剩余 ${REMAINING}s（每 10s 检查一次）"
 
-            # 检查日志关键字
             if docker logs subs-check 2>&1 | grep -q "下次检查时间"; then
               FOUND=true
               echo "✅ 检测到'下次检查时间'，检查已完成"
               break
             fi
 
-            # 检查容器是否还在运行
             if [ "$(docker inspect -f '{{.State.Running}}' subs-check 2>/dev/null)" != "true" ]; then
               echo "⚠️ 容器已自行退出，停止等待"
               break
@@ -34,7 +54,6 @@
             ELAPSED=$((ELAPSED + 10))
           done
 
-          # 收尾提示
           if [ "$FOUND" = "true" ]; then
             echo "🎯 原因：日志中出现了'下次检查时间'"
           elif [ $ELAPSED -ge $TIMEOUT ]; then
@@ -43,11 +62,15 @@
             echo "🛑 原因：容器提前退出"
           fi
 
-          # 打印完整日志
           echo "=== subs-check 容器日志 ==="
           docker logs subs-check 2>&1 || true
 
-          # 停止并清理容器
           docker kill subs-check 2>/dev/null || true
           docker rm subs-check 2>/dev/null || true
           echo "🧹 容器已清理，进入下一步"
+
+      - name: 上传检测结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: subs-check-results
+          path: output/
