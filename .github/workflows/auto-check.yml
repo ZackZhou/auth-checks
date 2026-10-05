@@ -74,3 +74,30 @@ jobs:
         with:
           name: subs-check-results
           path: output/
+
+  send-email:
+    needs: check-subscriptions
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载检测结果
+        uses: actions/download-artifact@v4
+        with:
+          name: subs-check-results
+          path: output
+
+      - name: 发送邮件
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SMTP_HOST }}
+          server_port: ${{ secrets.MAIL_SMTP_PORT }}
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: subs-check 检测结果 - ${{ github.run_id }}
+          # 两个收件人，用英文逗号分隔
+          to: ${{ secrets.MAIL_TO_1 }}, ${{ secrets.MAIL_TO_2 }}
+          from: 'subs-check <${{ secrets.MAIL_USERNAME }}>'
+          # 邮件正文直接使用 base64.txt 的内容
+          body: file://output/base64.txt
+          # 同时作为附件发送
+          attachments: output/base64.txt
