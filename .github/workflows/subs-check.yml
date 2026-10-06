@@ -2,8 +2,8 @@ name: Run subs-check
 
 on:
   schedule:
-    # 中国时间每天 08:00 运行（UTC 00:00）
-    - cron: '0 0 * * *'
+    # 每 8 小时运行一次（UTC 0:00, 8:00, 16:00；对应中国时间 8:00, 16:00, 0:00）
+    - cron: '0 */8 * * *'
   workflow_dispatch:
 
 jobs:
@@ -76,7 +76,8 @@ jobs:
           name: subs-check-results
           path: output/
 
-  send-email:
+  # 新增：过滤 all.yaml，只保留包含 client-fingerprint 的节点
+  filter-all-yaml:
     needs: check-subscriptions
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +85,57 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: subs-check-results
+          path: output
+
+      - name: 安装 PyYAML
+        run: python3 -m pip install pyyaml
+
+      - name: 过滤 all.yaml
+        run: |
+          python3 - <<'EOF'
+          import yaml
+          from pathlib import Path
+
+          input_file = Path('output/all.yaml')
+          output_file = Path('output/all.yaml')  # 直接覆盖原文件
+
+          with input_file.open('r', encoding='utf-8') as f:
+              data = yaml.safe_load(f)
+
+          proxies = data.get('proxies', [])
+          if not isinstance(proxies, list):
+              raise SystemExit('错误：all.yaml 中未找到 proxies 列表')
+
+          # 只保留包含 client-fingerprint 且值非空的节点
+          filtered = [
+              p for p in proxies
+              if isinstance(p, dict)
+              and 'client-fingerprint' in p
+              and p['client-fingerprint']
+          ]
+
+          data['proxies'] = filtered
+
+          with output_file.open('w', encoding='utf-8') as f:
+              yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+
+          print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}')
+          EOF
+
+      - name: 上传过滤后的结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: subs-check-filtered
+          path: output/
+
+  send-email:
+    needs: filter-all-yaml
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载过滤后的结果
+        uses: actions/download-artifact@v4
+        with:
+          name: subs-check-filtered
           path: output
 
       - name: 发送邮件
@@ -100,5 +152,5 @@ jobs:
           from: 'subs-check <${{ secrets.MAIL_USERNAME }}>'
           # 邮件正文直接使用 base64.txt 的内容
           body: file://output/base64.txt
-          # 同时作为附件发送
-          attachments: output/base64.txt
+          # 同时作为附件发送：base64.txt 和过滤后的 all.yaml
+          attachments: output/base64.txt,output/all.yaml
