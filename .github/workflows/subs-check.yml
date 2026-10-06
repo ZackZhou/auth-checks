@@ -2,7 +2,7 @@ name: Run subs-check
 
 on:
   schedule:
-    # 每 8 小时运行一次（UTC 0:00, 8:00, 16:00；对应中国时间 8:00, 16:00, 0:00）
+    # 每 8 小时运行一次（UTC 0:00, 8:00, 16:00；对应中国时间 8:00, 16:00, 次日 0:00）
     - cron: '0 */8 * * *'
   workflow_dispatch:
 
@@ -76,7 +76,7 @@ jobs:
           name: subs-check-results
           path: output/
 
-  # 新增：过滤 all.yaml，只保留包含 client-fingerprint 的节点
+  # 新增：过滤 all.yaml，只保留包含 client-fingerprint 的节点，并重新生成 base64.txt
   filter-all-yaml:
     needs: check-subscriptions
     runs-on: ubuntu-latest
@@ -90,37 +90,167 @@ jobs:
       - name: 安装 PyYAML
         run: python3 -m pip install pyyaml
 
-      - name: 过滤 all.yaml
+      - name: 过滤 all.yaml 并重新生成 base64.txt
         run: |
-          python3 - <<'EOF'
+          python3 - <<'PYEOF'
           import yaml
+          import base64
+          import json
+          import urllib.parse
           from pathlib import Path
 
-          input_file = Path('output/all.yaml')
-          output_file = Path('output/all.yaml')  # 直接覆盖原文件
+          def b64(s: str) -> str:
+              return base64.b64encode(s.encode()).decode()
 
-          with input_file.open('r', encoding='utf-8') as f:
-              data = yaml.safe_load(f)
+          def to_link(node: dict):
+              t = node.get('type')
+              name = node.get('name', '')
+              server = node.get('server', '')
+              port = node.get('port', '')
+              frag = '#' + urllib.parse.quote(name, safe='')
 
-          proxies = data.get('proxies', [])
-          if not isinstance(proxies, list):
-              raise SystemExit('错误：all.yaml 中未找到 proxies 列表')
+              if t == 'vless':
+                  params = {
+                      'encryption': 'none',
+                      'security': 'tls' if node.get('tls') else 'none',
+                  }
+                  if node.get('servername'):
+                      params['sni'] = node['servername']
+                  if node.get('client-fingerprint'):
+                      params['fp'] = node['client-fingerprint']
+                  if node.get('flow'):
+                      params['flow'] = node['flow']
 
-          # 只保留包含 client-fingerprint 且值非空的节点
-          filtered = [
-              p for p in proxies
-              if isinstance(p, dict)
-              and 'client-fingerprint' in p
-              and p['client-fingerprint']
-          ]
+                  network = node.get('network', 'tcp')
+                  params['type'] = network
 
-          data['proxies'] = filtered
+                  if network == 'ws':
+                      ws = node.get('ws-opts', {}) or {}
+                      if ws.get('path'):
+                          params['path'] = ws['path']
+                      host = (ws.get('headers') or {}).get('Host')
+                      if host:
+                          params['host'] = host
+                  elif network == 'grpc':
+                      grpc = node.get('grpc-opts', {}) or {}
+                      if grpc.get('grpc-service-name'):
+                          params['serviceName'] = grpc['grpc-service-name']
+                  elif network == 'xhttp':
+                      x = node.get('xhttp-opts', {}) or {}
+                      if x.get('path'):
+                          params['path'] = x['path']
+                      if x.get('host'):
+                          params['host'] = x['host']
+                      if x.get('mode'):
+                          params['mode'] = x['mode']
 
-          with output_file.open('w', encoding='utf-8') as f:
-              yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+                  # Reality 参数
+                  reality = node.get('reality-opts', {}) or {}
+                  if reality.get('public-key'):
+                      params['pbk'] = reality['public-key']
+                      params['security'] = 'reality'
+                  if reality.get('short-id'):
+                      params['sid'] = reality['short-id']
 
-          print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}')
-          EOF
+                  query = urllib.parse.urlencode(params)
+                  return f"vless://{node.get('uuid','')}@{server}:{port}?{query}{frag}"
+
+              if t == 'vmess':
+                  net = node.get('network', 'tcp')
+                  params = {
+                      'v': '2',
+                      'ps': name,
+                      'add': server,
+                      'port': str(port),
+                      'id': node.get('uuid', ''),
+                      'aid': str(node.get('alterId', 0)),
+                      'scy': node.get('cipher', 'auto'),
+                      'net': net,
+                      'type': 'none',
+                      'host': '',
+                      'path': '',
+                      'tls': 'tls' if node.get('tls') else '',
+                      'sni': node.get('servername', ''),
+                  }
+                  if net == 'ws':
+                      ws = node.get('ws-opts', {}) or {}
+                      params['path'] = ws.get('path', '')
+                      params['host'] = (ws.get('headers') or {}).get('Host', '')
+                  return 'vmess://' + b64(json.dumps(params, ensure_ascii=False))
+
+              if t == 'trojan':
+                  params = {'security': 'tls'}
+                  if node.get('sni'):
+                      params['sni'] = node['sni']
+                  if node.get('client-fingerprint'):
+                      params['fp'] = node['client-fingerprint']
+
+                  network = node.get('network', 'tcp')
+                  params['type'] = network
+                  if network == 'ws':
+                      ws = node.get('ws-opts', {}) or {}
+                      if ws.get('path'):
+                          params['path'] = ws['path']
+                      host = (ws.get('headers') or {}).get('Host')
+                      if host:
+                          params['host'] = host
+                  query = urllib.parse.urlencode(params)
+                  return f"trojan://{node.get('password','')}@{server}:{port}?{query}{frag}"
+
+              if t == 'ss':
+                  cipher = node.get('cipher', '')
+                  password = node.get('password', '')
+                  userinfo = b64(f"{cipher}:{password}")
+                  return f"ss://{userinfo}@{server}:{port}{frag}"
+
+              return None
+
+          def main():
+              input_file = Path('output/all.yaml')
+              output_yaml = Path('output/all.yaml')
+              output_base64 = Path('output/base64.txt')
+
+              with input_file.open('r', encoding='utf-8') as f:
+                  data = yaml.safe_load(f)
+
+              proxies = data.get('proxies', [])
+              if not isinstance(proxies, list):
+                  raise SystemExit('错误：all.yaml 中未找到 proxies 列表')
+
+              # 过滤：只保留包含 client-fingerprint 且值非空的节点
+              filtered = [
+                  p for p in proxies
+                  if isinstance(p, dict)
+                  and 'client-fingerprint' in p
+                  and p['client-fingerprint']
+              ]
+
+              data['proxies'] = filtered
+
+              with output_yaml.open('w', encoding='utf-8') as f:
+                  yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+
+              # 生成 base64 订阅内容
+              links = []
+              for p in filtered:
+                  link = to_link(p)
+                  if link:
+                      links.append(link)
+
+              if not links:
+                  raise SystemExit('没有生成任何分享链接，检查 all.yaml 是否为空')
+
+              text = '\n'.join(links)
+              result = base64.b64encode(text.encode()).decode()
+
+              with output_base64.open('w', encoding='utf-8') as f:
+                  f.write(result)
+
+              print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}，生成分享链接：{len(links)}')
+
+          if __name__ == '__main__':
+              main()
+          PYEOF
 
       - name: 上传过滤后的结果
         uses: actions/upload-artifact@v4
