@@ -130,6 +130,7 @@ jobs:
           python3 - <<'PYEOF'
           import base64
           import json
+          import re
           import urllib.parse
           from pathlib import Path
 
@@ -309,11 +310,61 @@ jobs:
                   yaml.dump(data, f, allow_unicode=True, sort_keys=False)
 
               # 生成 base64 订阅内容
+              # 顺便做安全过滤：挡掉明文节点、占位/测试域名、环回与内网地址。
+              # 审计发现过 18 个节点指向 www.speedtest.net:443（缺省模板残留），
+              # 以及 1 个 security=none 的明文节点，这两种都不该进订阅。
+              BOGUS_HOST = re.compile(
+                  r'^(localhost|127\.|0\.0\.0\.0|::1|10\.|192\.168\.'
+                  r'|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)',
+                  re.I,
+              )
+              TEST_HOST = re.compile(
+                  r'(speedtest|ookla|fast\.com|example\.(com|org)|test\.com)',
+                  re.I,
+              )
+
+              def is_unsafe(node):
+                  """返回丢弃原因，安全则返回 None。"""
+                  server = str(node.get('server', '')).strip()
+                  if not server:
+                      return '没有 server 字段'
+                  if BOGUS_HOST.match(server):
+                      return f'环回/内网地址 ({server})'
+                  if TEST_HOST.search(server):
+                      return f'测试/占位域名 ({server})'
+                  # 传输加密判断：显式 security=none 一律丢弃；
+                  # 否则要求有 TLS、Reality，或（vless 的）flow/xtls 证据。
+                  # ss/ssr 自带加密，不适用本判断。
+                  if node.get('type') in ('vless', 'vmess', 'trojan'):
+                      security = str(node.get('security', '')).lower()
+                      reality = node.get('reality-opts') or {}
+                      has_reality = bool(reality.get('public-key'))
+                      has_flow = bool(str(node.get('flow', '')).strip())
+                      if security in ('none', '') and not node.get('tls') and not has_reality and not has_flow:
+                          return f'未启用加密 (security={security or "none"})'
+                  return None
+
+              unsafe = []
               links = []
               for p in filtered:
+                  reason = is_unsafe(p)
+                  if reason:
+                      unsafe.append((p.get('server', '?'), reason))
+                      continue
                   link = to_link(p)
                   if link:
                       links.append(link)
+
+              if unsafe:
+                  print(f'安全过滤丢弃 {len(unsafe)} 个节点：')
+                  reasons = {}
+                  for _, reason in unsafe:
+                      key = reason.split(' (')[0]
+                      reasons[key] = reasons.get(key, 0) + 1
+                  for key, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+                      print(f'  - {key}: {count} 个')
+                  for server, reason in unsafe[:5]:
+                      print(f'    例: {server} -> {reason}')
 
               if not links:
                   # 过滤后没有节点：同样写占位文件，而不是让整条流水线失败
@@ -331,7 +382,8 @@ jobs:
               with OUTPUT_BASE64.open('w', encoding='utf-8') as f:
                   f.write(result + '\n')
 
-              print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}，生成分享链接：{len(links)}')
+              print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}，'
+                    f'安全过滤后：{len(links)}，丢弃：{len(unsafe)}')
 
           if __name__ == '__main__':
               main()
