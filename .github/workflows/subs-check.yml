@@ -98,10 +98,8 @@ jobs:
           echo "output/ 内容："
           ls -la output || true
           test -f output/all.yaml || { echo "缺少 output/all.yaml"; exit 1; }
-          # all.yaml 里每个节点以顶格的 "- " 开头，name 缩进两空格
-          echo "all.yaml 节点数：$(grep -c '^- ' output/all.yaml || true)"
-          echo "各协议数量："
-          grep -E '^\s+type: ' output/all.yaml 2>/dev/null | sort | uniq -c | sort -rn || true
+          # 注意：过滤步骤会用自己的结果覆写 all.yaml，所以这里看到的是过滤后的节点
+          echo "过滤后 all.yaml 节点数：$(grep -c '^- ' output/all.yaml || true)"
 
       - name: 上传检测结果
         uses: actions/upload-artifact@v4
@@ -290,6 +288,20 @@ jobs:
                   and 'client-fingerprint' in p
                   and p['client-fingerprint']
               ]
+
+              # 打印过滤前后的对比，否则这个步骤静默丢掉一半节点都没人知道
+              def count_by_type(nodes):
+                  counts = {}
+                  for n in nodes:
+                      counts[n.get('type', '?')] = counts.get(n.get('type', '?'), 0) + 1
+                  return counts
+
+              print(f'过滤前（subs-check 全量）: {len(proxies)} 个  {count_by_type(proxies)}')
+              print(f'过滤后（只有带 fp 的）   : {len(filtered)} 个  {count_by_type(filtered)}')
+              dropped = len(proxies) - len(filtered)
+              if dropped:
+                  print(f'因缺少 client-fingerprint 被丢弃: {dropped} 个 '
+                        f'({dropped * 100 // max(len(proxies), 1)}%)')
 
               data['proxies'] = filtered
 
