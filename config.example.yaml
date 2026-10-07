@@ -59,10 +59,13 @@ rename-node: true
 node-prefix: ""
 
 # 只测试指定协议的节点
+# 加入 ss / trojan：原始订阅池里有大量这两个协议的节点，
+# 不列在这里就完全不会被检测（诊断报告 DIAGNOSIS.md 第 3.2 节）
 node-type:
-  # - ss
-   - vmess
-   - vless
+  - vmess
+  - vless
+  - ss
+  - trojan
 
 # 节点名称过滤，只有匹配任一正则表达式的节点才会被保留
 # 如果为空则不过滤，所有通过测试的节点都会保留
