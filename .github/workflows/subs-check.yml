@@ -5,6 +5,22 @@ on:
     # 每 8 小时运行一次（UTC 0:00, 8:00, 16:00；对应中国时间 8:00, 16:00, 次日 0:00）
     - cron: '0 */8 * * *'
   workflow_dispatch:
+    inputs:
+      skip_check:
+        description: '跳过 subs-check 检测，只重新发布 Pages（用于测试 Pages 是否可用）'
+        type: boolean
+        default: false
+
+# 发布到 GitHub Pages 需要的权限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一分支只保留最新一次运行，避免旧运行覆盖新结果
+concurrency:
+  group: subs-check-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check-subscriptions:
@@ -21,6 +37,7 @@ jobs:
           mkdir -p output
 
       - name: 运行 subs-check (Docker)
+        if: ${{ !inputs.skip_check }}
         run: |
           # 后台启动容器，指定运行用户，避免产物权限问题
           docker run -d --name subs-check \
@@ -70,13 +87,20 @@ jobs:
           docker rm subs-check 2>/dev/null || true
           echo "🧹 容器已清理，进入下一步"
 
+      - name: 列出检测结果
+        run: |
+          echo "output/ 内容："
+          ls -la output || true
+
       - name: 上传检测结果
         uses: actions/upload-artifact@v4
         with:
           name: subs-check-results
+          # .gitkeep 保证即使产物为空也能上传成功
           path: output/
+          if-no-files-found: warn
 
-  # 新增：过滤 all.yaml，只保留包含 client-fingerprint 的节点，并重新生成 base64.txt
+  # 过滤 all.yaml，只保留包含 client-fingerprint 的节点，并重新生成 base64.txt
   filter-all-yaml:
     needs: check-subscriptions
     runs-on: ubuntu-latest
@@ -93,11 +117,17 @@ jobs:
       - name: 过滤 all.yaml 并重新生成 base64.txt
         run: |
           python3 - <<'PYEOF'
-          import yaml
           import base64
           import json
           import urllib.parse
           from pathlib import Path
+
+          import yaml
+
+          OUTPUT_DIR = Path('output')
+          INPUT_FILE = OUTPUT_DIR / 'all.yaml'
+          OUTPUT_YAML = OUTPUT_DIR / 'all.yaml'
+          OUTPUT_BASE64 = OUTPUT_DIR / 'base64.txt'
 
           def b64(s: str) -> str:
               return base64.b64encode(s.encode()).decode()
@@ -206,12 +236,35 @@ jobs:
               return None
 
           def main():
-              input_file = Path('output/all.yaml')
-              output_yaml = Path('output/all.yaml')
-              output_base64 = Path('output/base64.txt')
+              OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-              with input_file.open('r', encoding='utf-8') as f:
+              if not INPUT_FILE.exists():
+                  # 检测步骤没产出 all.yaml（提前退出，或手动跳过了检测）
+                  OUTPUT_BASE64.write_text(
+                      '# no results: output/all.yaml was not produced by this run\n',
+                      encoding='utf-8',
+                  )
+                  print('未找到 output/all.yaml，已写入占位 base64.txt')
+                  return
+
+              if INPUT_FILE.stat().st_size == 0:
+                  OUTPUT_BASE64.write_text(
+                      '# no results: output/all.yaml is empty\n',
+                      encoding='utf-8',
+                  )
+                  print('output/all.yaml 是空文件，已写入占位 base64.txt')
+                  return
+
+              with INPUT_FILE.open('r', encoding='utf-8') as f:
                   data = yaml.safe_load(f)
+
+              if not isinstance(data, dict):
+                  OUTPUT_BASE64.write_text(
+                      '# no results: output/all.yaml is not a mapping\n',
+                      encoding='utf-8',
+                  )
+                  print('output/all.yaml 内容不是字典结构，已写入占位 base64.txt')
+                  return
 
               proxies = data.get('proxies', [])
               if not isinstance(proxies, list):
@@ -227,7 +280,7 @@ jobs:
 
               data['proxies'] = filtered
 
-              with output_yaml.open('w', encoding='utf-8') as f:
+              with OUTPUT_YAML.open('w', encoding='utf-8') as f:
                   yaml.dump(data, f, allow_unicode=True, sort_keys=False)
 
               # 生成 base64 订阅内容
@@ -238,13 +291,20 @@ jobs:
                       links.append(link)
 
               if not links:
-                  raise SystemExit('没有生成任何分享链接，检查 all.yaml 是否为空')
+                  # 过滤后没有节点：同样写占位文件，而不是让整条流水线失败
+                  OUTPUT_BASE64.write_text(
+                      '# no nodes left after filtering\n',
+                      encoding='utf-8',
+                  )
+                  print('过滤后没有可用节点，已写入占位 base64.txt')
+                  return
 
               text = '\n'.join(links)
               result = base64.b64encode(text.encode()).decode()
 
-              with output_base64.open('w', encoding='utf-8') as f:
-                  f.write(result)
+              # 末尾补一个换行：既是多数订阅格式的习惯，也让 `wc -l` 能数对节点数
+              with OUTPUT_BASE64.open('w', encoding='utf-8') as f:
+                  f.write(result + '\n')
 
               print(f'原始节点数：{len(proxies)}，过滤后：{len(filtered)}，生成分享链接：{len(links)}')
 
@@ -284,3 +344,50 @@ jobs:
           body: file://output/base64.txt
           # 同时作为附件发送：base64.txt 和过滤后的 all.yaml
           attachments: output/base64.txt,output/all.yaml
+
+  # 把 base64.txt 发布到 GitHub Pages，得到一个固定 URL 直接访问
+  publish-pages:
+    needs: filter-all-yaml
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 下载过滤后的结果
+        uses: actions/download-artifact@v4
+        with:
+          name: subs-check-filtered
+          path: output
+
+      - name: 准备 Pages 站点目录
+        run: |
+          mkdir -p public
+          cp output/base64.txt public/base64.txt
+
+          # 附上节点数量与更新时间，方便确认站点内容是新的
+          # printf 补上末尾换行，wc -l 才能把最后一个链接也数进去
+          {
+            echo "nodes:  $(printf '%s\n' "$(base64 -d public/base64.txt 2>/dev/null)" | grep -c .)"
+            echo "run:    ${{ github.run_number }}"
+            echo "time:   $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
+            echo "commit: ${{ github.sha }}"
+          } > public/status.txt
+
+          # 不希望被搜索引擎收录
+          printf 'User-agent: *\nDisallow: /\n' > public/robots.txt
+          printf '<!doctype html><meta name="robots" content="noindex"><title>base64.txt</title><a href="base64.txt">base64.txt</a>\n' > public/index.html
+
+          ls -la public
+          echo "base64.txt 大小：$(wc -c < public/base64.txt) 字节"
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 打包站点
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: 部署到 Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
