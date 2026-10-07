@@ -4,6 +4,10 @@ on:
   schedule:
     # 每 8 小时运行一次（UTC 0:00, 8:00, 16:00；对应中国时间 8:00, 16:00, 次日 0:00）
     - cron: '0 */8 * * *'
+    # 每小时醒一次但只在整点小时（UTC 0/8/16）真正检测：
+    # 这样你随时手动改配置或重新触发，最迟 1 小时内就会自动更新，
+    # 其余整点直接快速结束，不会白跑 30 分钟的检测。
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       skip_check:
@@ -31,6 +35,20 @@ jobs:
       - name: Checkout 仓库
         uses: actions/checkout@v4
 
+      - name: 决定本次是否检测
+        id: decide
+        run: |
+          # 两种情况跳过检测：手动勾了 skip_check，或每小时唤醒但不在 0/8/16 点
+          SKIP="${{ inputs.skip_check }}"
+          HOUR="$(date -u +%H)"
+          if [ "$SKIP" = "true" ]; then
+            echo "skip=true reason=manual (skip_check)"
+          elif [ "$HOUR" != "00" ] && [ "$HOUR" != "08" ] && [ "$HOUR" != "16" ]; then
+            echo "skip=true reason=off-hour ($HOUR UTC, 只在 0/8/16 点检测)"
+          else
+            echo "skip=false (整点检测)"
+          fi | tee -a "$GITHUB_OUTPUT"
+
       - name: 准备配置文件和输出目录
         run: |
           cp config.example.yaml config.yaml
@@ -41,7 +59,7 @@ jobs:
           ls -la output
 
       - name: 运行 subs-check (Docker)
-        if: ${{ !inputs.skip_check }}
+        if: ${{ steps.decide.outputs.skip != 'true' }}
         run: |
           # 后台启动容器，指定运行用户，避免产物权限问题
           docker run -d --name subs-check \
