@@ -98,13 +98,18 @@ jobs:
           echo "output/ 内容："
           ls -la output || true
           test -f output/all.yaml || { echo "缺少 output/all.yaml"; exit 1; }
-          echo "all.yaml 节点数：$(grep -c '^  - name:' output/all.yaml || true)"
+          # all.yaml 里每个节点以顶格的 "- " 开头，name 缩进两空格
+          echo "all.yaml 节点数：$(grep -c '^- ' output/all.yaml || true)"
+          echo "各协议数量："
+          grep -E '^\s+type: ' output/all.yaml 2>/dev/null | sort | uniq -c | sort -rn || true
 
       - name: 上传检测结果
         uses: actions/upload-artifact@v4
         with:
           name: subs-check-results
-          path: output/
+          path: |
+            output/
+            !output/node
           # 出错就报错，而不是静默产出一个空产物
           if-no-files-found: error
 
