@@ -35,6 +35,10 @@ jobs:
         run: |
           cp config.example.yaml config.yaml
           mkdir -p output
+          # 先写一个空的 all.yaml：这样即使 subs-check 被跳过或提前退出，
+          # output/ 里也有一个非隐藏文件，产物一定能上传成功
+          printf 'proxies: []\n' > output/all.yaml
+          ls -la output
 
       - name: 运行 subs-check (Docker)
         if: ${{ !inputs.skip_check }}
@@ -91,14 +95,16 @@ jobs:
         run: |
           echo "output/ 内容："
           ls -la output || true
+          test -f output/all.yaml || { echo "缺少 output/all.yaml"; exit 1; }
+          echo "all.yaml 节点数：$(grep -c '^  - name:' output/all.yaml || true)"
 
       - name: 上传检测结果
         uses: actions/upload-artifact@v4
         with:
           name: subs-check-results
-          # .gitkeep 保证即使产物为空也能上传成功
           path: output/
-          if-no-files-found: warn
+          # 出错就报错，而不是静默产出一个空产物
+          if-no-files-found: error
 
   # 过滤 all.yaml，只保留包含 client-fingerprint 的节点，并重新生成 base64.txt
   filter-all-yaml:
